@@ -2,6 +2,7 @@
 import copy
 import json
 import os
+import sys
 from pathlib import Path
 
 from loguru import logger
@@ -164,7 +165,11 @@ def parse_doc(
         method="auto",
         server_url=None,
         start_page_id=0,
-        end_page_id=None
+        end_page_id=None,
+        translate_to_english=False,
+        translation_api_key=None,
+        generate_pdf=False,
+        fix_md=False
 ):
     """
         Parameter description:
@@ -188,6 +193,10 @@ def parse_doc(
         server_url: When the backend is `http-client`, you need to specify the server_url, for example:`http://127.0.0.1:30000`
         start_page_id: Start page ID for parsing, default is 0
         end_page_id: End page ID for parsing, default is None (parse all pages until the end of the document)
+        translate_to_english: Whether to translate the parsed markdown to English, default is False
+        translation_api_key: API key for translation service (required if translate_to_english is True)
+        generate_pdf: Whether to generate PDF from the translated markdown, default is False
+        fix_md: Whether to apply advanced markdown fixing to the final markdown file, default is False
     """
     try:
         file_name_list = []
@@ -210,6 +219,67 @@ def parse_doc(
             start_page_id=start_page_id,
             end_page_id=end_page_id
         )
+
+        # 后处理步骤：翻译、PDF生成和Markdown修复
+        if translate_to_english or generate_pdf or fix_md:
+            # 添加 post_processing 目录到 Python 路径
+            post_processing_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), "post_processing")
+            if post_processing_path not in sys.path:
+                sys.path.insert(0, post_processing_path)
+
+            try:
+                from translate.translate import translate_file
+                from merge_back.auto_generate_pdf import generate_pdf_from_md_file
+                # 导入markdown修复功能
+                sys.path.insert(0, os.path.dirname(__file__))  # 添加demo目录到路径
+                from fix_md import advanced_fix_markdown
+            except ImportError as e:
+                logger.error(f"无法导入后处理模块: {e}")
+                return
+
+            for idx, pdf_file_name in enumerate(file_name_list):
+                # 构建输出目录路径
+                parse_method_dir = method if method != "auto" else "auto"
+                file_output_dir = os.path.join(output_dir, pdf_file_name, parse_method_dir)
+
+                # 原始markdown文件路径
+                original_md_path = os.path.join(file_output_dir, f"{pdf_file_name}.md")
+                translated_md_path = os.path.join(file_output_dir, f"{pdf_file_name}_translated.md")
+
+                # 翻译步骤
+                if translate_to_english:
+                    if translation_api_key is None:
+                        logger.error("翻译功能需要提供 translation_api_key")
+                        continue
+
+                    logger.info(f"开始翻译文档: {pdf_file_name}")
+                    success = translate_file(original_md_path, translated_md_path, translation_api_key)
+                    if not success:
+                        logger.error(f"翻译失败: {pdf_file_name}")
+                        continue
+
+                # PDF生成
+                if generate_pdf:
+                    target_md_path = translated_md_path if translate_to_english else original_md_path
+                    pdf_output_path = os.path.join(file_output_dir, f"{pdf_file_name}_final_paper.pdf")
+
+                    logger.info(f"开始生成PDF: {pdf_file_name}")
+                    success = generate_pdf_from_md_file(target_md_path, pdf_output_path)
+                    if not success:
+                        logger.error(f"PDF生成失败: {pdf_file_name}")
+
+                # Markdown修复
+                if fix_md:
+                    # 确定要修复的目标文件：优先使用翻译后的文件，如果没有翻译则使用原始文件
+                    target_md_path = translated_md_path if translate_to_english and os.path.exists(translated_md_path) else original_md_path
+
+                    logger.info(f"开始修复Markdown文件: {pdf_file_name}")
+                    try:
+                        advanced_fix_markdown(target_md_path)
+                        logger.info(f"Markdown修复完成: {pdf_file_name}")
+                    except Exception as e:
+                        logger.error(f"Markdown修复失败: {pdf_file_name}, 错误: {e}")
+
     except Exception as e:
         logger.exception(e)
 
@@ -217,7 +287,7 @@ def parse_doc(
 if __name__ == '__main__':
     # args
     __dir__ = os.path.dirname(os.path.abspath(__file__))
-    pdf_files_dir = os.path.join(__dir__, "pdfs")
+    pdf_files_dir = os.path.join(__dir__, "real")
     output_dir = os.path.join(__dir__, "output")
     pdf_suffixes = ["pdf"]
     image_suffixes = ["png", "jpeg", "jp2", "webp", "gif", "bmp", "jpg"]
@@ -229,9 +299,16 @@ if __name__ == '__main__':
 
     """如果您由于网络问题无法下载模型，可以设置环境变量MINERU_MODEL_SOURCE为modelscope使用免代理仓库下载模型"""
     # os.environ['MINERU_MODEL_SOURCE'] = "modelscope"
+    api_key = "apikey-dd675b2a3fcb4f1aa88b91503d87f730"
 
     """Use pipeline mode if your environment does not support VLM"""
-    parse_doc(doc_path_list, output_dir, backend="pipeline")
+    parse_doc(doc_path_list, output_dir, backend="pipeline", translate_to_english=True, translation_api_key=api_key, fix_md=True)
+
+    """启用翻译、PDF生成和Markdown修复功能的示例"""
+    # 翻译API key - 请替换为你的实际API key
+    api_key = "apikey-dd675b2a3fcb4f1aa88b91503d87f730"
+    # parse_doc(doc_path_list, output_dir, backend="pipeline",
+    #          translate_to_english=True, translation_api_key=api_key, generate_pdf=True, fix_md=True)
 
     """To enable VLM mode, change the backend to 'vlm-xxx'"""
     # parse_doc(doc_path_list, output_dir, backend="vlm-transformers")  # more general.

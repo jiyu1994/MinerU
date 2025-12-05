@@ -51,3 +51,8 @@ _build/
 
 
 output/
+demo/output/
+demo/real/
+
+mineru.egg-info/
+models/
