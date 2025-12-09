@@ -169,7 +169,9 @@ def parse_doc(
         translate_to_english=False,
         translation_api_key=None,
         generate_pdf=False,
-        fix_md=False
+        fix_md=False,
+        translate_images=False,
+        generate_config=False,
 ):
     """
         Parameter description:
@@ -197,6 +199,8 @@ def parse_doc(
         translation_api_key: API key for translation service (required if translate_to_english is True)
         generate_pdf: Whether to generate PDF from the translated markdown, default is False
         fix_md: Whether to apply advanced markdown fixing to the final markdown file, default is False
+        translate_images: Whether to translate images, default is False
+        generate_config: Whether to generate layout config and final markdown, default is False
     """
     try:
         file_name_list = []
@@ -220,8 +224,8 @@ def parse_doc(
             end_page_id=end_page_id
         )
 
-        # 后处理步骤：翻译、PDF生成和Markdown修复
-        if translate_to_english or generate_pdf or fix_md:
+        # 后处理步骤：翻译、PDF生成、Markdown修复、图片翻译、配置生成
+        if translate_to_english or generate_pdf or fix_md or translate_images or generate_config:
             post_processing_path = os.path.join(os.path.dirname(__file__), "post_processing")
             if post_processing_path not in sys.path:
                 sys.path.insert(0, post_processing_path)
@@ -240,6 +244,8 @@ def parse_doc(
                 translation_api_key=translation_api_key,
                 generate_pdf=generate_pdf,
                 fix_md=fix_md,
+                translate_images=translate_images,
+                generate_config=generate_config,
             )
 
     except Exception as e:

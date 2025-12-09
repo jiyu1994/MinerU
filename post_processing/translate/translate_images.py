@@ -4,9 +4,10 @@ import shutil
 import requests
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from PIL import Image
+from loguru import logger
 
 # ================= 配置区域 =================
-API_KEY = "apikey-dd675b2a3fcb4f1aa88b91503d87f730" 
+API_KEY = "apikey-dd675b2a3fcb4f1aa88b91503d87f730"
 TARGET_FOLDER = "output/H3_AP202001201374385298_1/auto/images"
 PROMPT_TEXT = "Translate other languages in the image to English"
 
@@ -27,7 +28,7 @@ def get_image_info(image_path):
                 "mode": img.mode      # 如 'RGB', 'RGBA'
             }
     except Exception as e:
-        print(f"读取图片信息失败: {e}")
+        logger.exception(f"读取图片信息失败: {image_path}, 错误: {e}")
         return None
 
 def get_safe_dimensions(w, h):
@@ -71,25 +72,44 @@ def post_process_image(downloaded_path, final_save_path, original_info):
             return True
             
     except Exception as e:
-        print(f"后处理（还原尺寸/格式）失败: {e}")
+        logger.exception(
+            "后处理（还原尺寸/格式）失败",
+            downloaded_path=downloaded_path,
+            final_save_path=final_save_path,
+            original_info=original_info,
+            error=e,
+        )
         return False
 
 def upload_temp_image(file_path, filename_tag):
     url = "https://tmpfiles.org/api/v1/upload"
+    logger.info(f"[{filename_tag}] 上传临时文件开始: {file_path}")
     try:
         with open(file_path, 'rb') as f:
             response = requests.post(url, files={'file': f}, headers={'Connection': 'close'}, timeout=60)
         
         if response.status_code == 200:
             data = response.json()
-            return data['data']['url'].replace("tmpfiles.org/", "tmpfiles.org/dl/")
-    except Exception:
-        pass
+            temp_url = data['data']['url'].replace("tmpfiles.org/", "tmpfiles.org/dl/")
+            logger.info(f"[{filename_tag}] 上传成功，临时地址: {temp_url}")
+            return temp_url
+        else:
+            logger.error(
+                f"[{filename_tag}] 上传失败",
+                status_code=response.status_code,
+                text=response.text,
+            )
+    except Exception as e:
+        logger.exception(f"[{filename_tag}] 上传临时文件异常: {e}", file_path=file_path)
     return None
 
-def process_with_ai(image_url, safe_w, safe_h, filename_tag):
+def process_with_ai(image_url, safe_w, safe_h, filename_tag, api_key, prompt_text):
     generate_url = "https://api.atlascloud.ai/api/v1/model/generateImage"
-    headers = {"Content-Type": "application/json", "Authorization": f"Bearer {API_KEY}", "Connection": "close"}
+    headers = {
+        "Content-Type": "application/json",
+        "Authorization": f"Bearer {api_key}",
+        "Connection": "close",
+    }
 
     data = {
         "model": "google/nano-banana-pro/edit-ultra",
@@ -99,36 +119,66 @@ def process_with_ai(image_url, safe_w, safe_h, filename_tag):
         # 即使我们要 JPG，中间过程也建议请求 PNG，避免反复压缩导致画质劣化
         # 我们最后会在本地转回 JPG
         "output_format": "png", 
-        "prompt": PROMPT_TEXT,
+        "prompt": prompt_text,
         "width": safe_w,
         "height": safe_h
     }
 
+    logger.info(
+        f"[{filename_tag}] AI 请求开始",
+        image_url=image_url,
+        safe_w=safe_w,
+        safe_h=safe_h,
+        prompt=prompt_text,
+    )
+
     try:
         resp = requests.post(generate_url, headers=headers, json=data, timeout=30)
+        if resp.status_code != 200:
+            logger.error(
+                f"[{filename_tag}] 触发生成失败",
+                status_code=resp.status_code,
+                text=resp.text,
+            )
+            return None
+
         res_json = resp.json()
-        if "data" not in res_json: return None
+        if "data" not in res_json:
+            logger.error(f"[{filename_tag}] 生成响应缺少 data 字段", response=res_json)
+            return None
         
         pred_id = res_json["data"]["id"]
         poll_url = f"https://api.atlascloud.ai/api/v1/model/prediction/{pred_id}"
+        logger.info(f"[{filename_tag}] 进入轮询: {poll_url}")
         
         while True:
             try:
-                poll_resp = requests.get(poll_url, headers={"Authorization": f"Bearer {API_KEY}", "Connection": "close"}, timeout=30)
-                status = poll_resp.json()["data"]["status"]
+                poll_resp = requests.get(
+                    poll_url,
+                    headers={"Authorization": f"Bearer {api_key}", "Connection": "close"},
+                    timeout=30,
+                )
+                poll_json = poll_resp.json()
+                status = poll_json["data"]["status"]
                 
                 if status == "completed":
-                    return poll_resp.json()["data"]["outputs"][0]
+                    output_url = poll_json["data"]["outputs"][0]
+                    logger.info(f"[{filename_tag}] 轮询完成，输出: {output_url}")
+                    return output_url
                 elif status == "failed":
+                    logger.error(f"[{filename_tag}] 轮询失败", response=poll_json)
                     return None
                 time.sleep(2)
-            except:
+            except Exception as e:
+                logger.warning(f"[{filename_tag}] 轮询异常，重试: {e}")
                 time.sleep(2)
-    except:
+    except Exception as e:
+        logger.exception(f"[{filename_tag}] AI 处理异常: {e}")
         return None
 
 def download_temp(url, save_path):
     """下载到临时文件"""
+    logger.info(f"下载生成结果: {url} -> {save_path}")
     try:
         response = requests.get(url, stream=True, headers={'Connection': 'close'}, timeout=60)
         if response.status_code == 200:
@@ -136,11 +186,13 @@ def download_temp(url, save_path):
                 for chunk in response.iter_content(1024):
                     f.write(chunk)
             return True
-    except:
-        pass
+        else:
+            logger.error("下载生成结果失败", status_code=response.status_code, text=response.text, url=url)
+    except Exception as e:
+        logger.exception(f"下载生成结果异常: {e}", url=url, save_path=save_path)
     return False
 
-def worker_task(filename, source_folder, target_folder):
+def worker_task(filename, source_folder, target_folder, api_key, prompt_text):
     source_path = os.path.join(source_folder, filename)
     target_path = os.path.join(target_folder, filename)
     
@@ -150,14 +202,16 @@ def worker_task(filename, source_folder, target_folder):
     supported_extensions = ('.jpg', '.jpeg', '.png', '.webp')
     if not filename.lower().endswith(supported_extensions):
         shutil.copy2(source_path, target_path)
+        logger.info(f"[{filename}] 非图片文件，直接复制。")
         return
 
-    print(f"[{filename}] 🚀 开始处理...")
+    logger.info(f"[{filename}] 🚀 开始处理...")
 
     # 1. 获取原图所有信息
     original_info = get_image_info(source_path)
     if not original_info:
         shutil.copy2(source_path, target_path)
+        logger.error(f"[{filename}] 获取原图信息失败，已保留原图。")
         return
 
     # 2. 计算 AI 需要的“凑整”尺寸
@@ -165,10 +219,18 @@ def worker_task(filename, source_folder, target_folder):
 
     # 3. 核心流程
     success = False
+    fail_reason = None
     temp_url = upload_temp_image(source_path, filename)
     
     if temp_url:
-        ai_result_url = process_with_ai(temp_url, safe_w, safe_h, filename)
+        ai_result_url = process_with_ai(
+            temp_url,
+            safe_w,
+            safe_h,
+            filename,
+            api_key,
+            prompt_text,
+        )
         if ai_result_url:
             # 先下载到临时文件 (格式可能是 PNG，尺寸是不对的)
             if download_temp(ai_result_url, temp_download_path):
@@ -176,7 +238,15 @@ def worker_task(filename, source_folder, target_folder):
                 # 把 temp 文件读取，缩放回原尺寸，转回原格式，覆盖保存到 target_path
                 if post_process_image(temp_download_path, target_path, original_info):
                     success = True
-                    print(f"[{filename}] ✅ 处理完成 (尺寸/格式已还原)")
+                    logger.info(f"[{filename}] ✅ 处理完成 (尺寸/格式已还原)")
+                else:
+                    fail_reason = "后处理失败"
+            else:
+                fail_reason = "下载结果失败"
+        else:
+            fail_reason = "AI 生成失败"
+    else:
+        fail_reason = "上传临时文件失败"
 
     # 清理临时下载文件
     if os.path.exists(temp_download_path):
@@ -184,37 +254,59 @@ def worker_task(filename, source_folder, target_folder):
 
     # 5. 失败保底
     if not success:
-        print(f"[{filename}] ⚠️ 失败，保留原图。")
+        logger.error(f"[{filename}] ⚠️ 失败，保留原图。原因: {fail_reason}")
         shutil.copy2(source_path, target_path)
 
-def main():
-    if not os.path.exists(TARGET_FOLDER):
-        print(f"错误：找不到文件夹 '{TARGET_FOLDER}'")
+def translate_images_for_folder(target_folder, api_key=None, prompt_text=None, max_workers=MAX_WORKERS):
+    """
+    翻译指定文件夹中的图片。会备份原图并并发处理。
+    """
+    api_key = api_key or API_KEY
+    prompt_text = prompt_text or PROMPT_TEXT
+
+    if not os.path.exists(target_folder):
+        logger.error(f"错误：找不到文件夹 '{target_folder}'")
         return
 
     timestamp = int(time.time())
-    backup_folder = f"{TARGET_FOLDER}_original_{timestamp}"
+    backup_folder = f"{target_folder}_original_{timestamp}"
     
     try:
-        os.rename(TARGET_FOLDER, backup_folder)
-        os.makedirs(TARGET_FOLDER)
-        print(f"=== 原图已备份至: {backup_folder} ===")
+        logger.info(f"开始图片翻译，目标目录: {target_folder}, 备份目录: {backup_folder}")
+        os.rename(target_folder, backup_folder)
+        os.makedirs(target_folder)
+        logger.info(f"=== 原图已备份至: {backup_folder} ===")
     except Exception as e:
-        print(f"初始化失败: {e}")
+        logger.exception(f"初始化失败: {e}", target_folder=target_folder, backup_folder=backup_folder)
         return
 
     all_files = [f for f in os.listdir(backup_folder) if os.path.isfile(os.path.join(backup_folder, f))]
-    print(f"开始处理 {len(all_files)} 个文件 (并发数: {MAX_WORKERS})...\n")
+    logger.info(f"开始处理 {len(all_files)} 个文件 (并发数: {max_workers})...\n")
 
     import urllib3
     urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
-    with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
-        futures = [executor.submit(worker_task, f, backup_folder, TARGET_FOLDER) for f in all_files]
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        futures = [
+            executor.submit(
+                worker_task,
+                f,
+                backup_folder,
+                target_folder,
+                api_key,
+                prompt_text,
+            )
+            for f in all_files
+        ]
         for future in as_completed(futures):
             pass
 
-    print("\n=== 全部完成 ===")
+    logger.info("图片翻译任务全部完成")
+    return True
+
+
+def main():
+    translate_images_for_folder(TARGET_FOLDER, api_key=API_KEY, prompt_text=PROMPT_TEXT, max_workers=MAX_WORKERS)
 
 if __name__ == "__main__":
     main()

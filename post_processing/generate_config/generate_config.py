@@ -1,6 +1,7 @@
 import json
 import os
 import math
+import fitz  # 用于读取 PDF 尺寸
 
 
 import re
@@ -253,12 +254,38 @@ def analyze_layout(SOURCE_JSON, OUTPUT_CONFIG, MarkDownPath):
 
     # 坐标已经是千分比单位，无需转换
 
-    # 8. 生成结果 (千分比单位)
+    # 8. 计算第一页真实尺寸（mm）
+    def get_page_size_mm():
+        # 推测 PDF 路径：与 JSON 同目录、同前缀
+        base_dir = os.path.dirname(SOURCE_JSON)
+        base_name = os.path.splitext(os.path.basename(SOURCE_JSON))[0].split('_')[0]
+        candidates = [
+            os.path.join(base_dir, f"{base_name}.pdf"),
+            os.path.join(base_dir, f"{base_name}_origin.pdf"),
+        ]
+        for pdf_path in candidates:
+            if os.path.exists(pdf_path):
+                doc = fitz.open(pdf_path)
+                try:
+                    rect = doc[0].rect
+                    # fitz 使用 pt，1 pt = 25.4 / 72 mm
+                    width_mm = rect.width * 25.4 / 72
+                    height_mm = rect.height * 25.4 / 72
+                    return f"{width_mm:.2f}", f"{height_mm:.2f}"
+                finally:
+                    doc.close()
+        # 找不到 PDF 时保持默认 1000（permille）兼容旧逻辑
+        print(f"❌ 错误：找不到 PDF 文件: {candidates}")
+        return "1000", "1000"
+
+    page_width_mm, page_height_mm = get_page_size_mm()
+
+    # 9. 生成结果
     result = {
         "page_size": {
-            "width": "1000",
-            "height": "1000",
-            "unit": "permille"
+            "width": page_width_mm,
+            "height": page_height_mm,
+            "unit": "mm"
         },
         "margins": {
             "top": f"{margin_top:.0f}",
