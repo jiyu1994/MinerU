@@ -326,7 +326,7 @@ def analyze_layout(SOURCE_JSON, OUTPUT_CONFIG, MarkDownPath):
         json.dump(result, f, indent=4, ensure_ascii=False)
     
     print(f">>> ✅ 成功生成配置: {OUTPUT_CONFIG}")
-    print(json.dumps(result, indent=4, ensure_ascii=False))
+    # print(json.dumps(result, indent=4, ensure_ascii=False))
 
     return create_final_markdown(others, MarkDownPath)
 

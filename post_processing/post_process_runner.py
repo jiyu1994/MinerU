@@ -1,8 +1,53 @@
 import os
 import sys
 import threading
+import time
+from typing import Optional
 
+import grpc
 from loguru import logger
+
+
+def _load_exporter_modules():
+    """
+    尝试加载 gRPC 导出服务的 pb2 模块，支持两种导入路径。
+    """
+    try:
+        import exporter_pb2  # type: ignore
+        import exporter_pb2_grpc  # type: ignore
+
+        return exporter_pb2, exporter_pb2_grpc
+    except ImportError:
+        try:
+            from post_processing import exporter_pb2, exporter_pb2_grpc  # type: ignore
+
+            return exporter_pb2, exporter_pb2_grpc
+        except ImportError as e:
+            raise ImportError("未找到 exporter_pb2 / exporter_pb2_grpc，请先根据 proto 生成客户端代码") from e
+
+
+def export_pdf_via_grpc(md_path: str, config_path: str, target: str, timeout: Optional[int] = 300) -> str:
+    """
+    通过 gRPC 调用远端服务生成 PDF。
+    """
+    if not os.path.exists(md_path):
+        raise FileNotFoundError(f"Markdown 文件不存在: {md_path}")
+    if not os.path.exists(config_path):
+        raise FileNotFoundError(f"布局配置不存在: {config_path}")
+    if not target:
+        raise ValueError("未提供有效的 gRPC 地址")
+
+    exporter_pb2, exporter_pb2_grpc = _load_exporter_modules()
+
+    request = exporter_pb2.ExportRequest(md_path=md_path, config_path=config_path)
+    with grpc.insecure_channel(target) as channel:
+        stub = exporter_pb2_grpc.PdfExporterStub(channel)
+        response = stub.ExportPdf(request, timeout=timeout)
+
+    if not getattr(response, "pdf_path", None):
+        raise RuntimeError("导出服务返回空的 pdf_path")
+
+    return response.pdf_path
 
 
 def run_post_processing(
@@ -16,6 +61,8 @@ def run_post_processing(
     translate_images_api_key=None,
     translate_images=True,
     generate_config=True,
+    pdf_exporter_address=None,
+    pdf_export_timeout=300,
 ):
     """执行翻译、PDF 生成、Markdown 修复等后处理流程。"""
     # 确保项目根目录在 Python 路径，便于用 post_processing.* 形式导入
@@ -27,19 +74,24 @@ def run_post_processing(
     try:
         from translate.translate_images import translate_images_for_folder
         from translate.translate import translate_file
-        from merge_back.auto_generate_pdf import generate_pdf_from_md_file
         from post_processing.fix_md.fix_md import advanced_fix_markdown
         from post_processing.generate_config.generate_config import analyze_layout
+        from post_processing.header_engine import header_engine
     except ImportError as e:
         logger.error(f"无法导入后处理模块: {e}")
         return
 
     translate_image_threads = []
+    header_futures = {}  # 缓存每个文件的 LLM 代码生成 Future
+    pdf_jobs = []  # 延后到所有图片翻译完成后再生成 PDF
+    total_start = time.perf_counter()
 
-    for pdf_file_name in file_name_list:
+    for file_idx, pdf_file_name in enumerate(file_name_list, start=1):
+        file_start = time.perf_counter()
         parse_method_dir = method if method != "auto" else "auto"
         file_output_dir = os.path.join(output_dir, pdf_file_name, parse_method_dir)
         images_dir = os.path.join(file_output_dir, "images")
+        translate_image_thread = None
 
         if translate_images and os.path.isdir(images_dir):
             def _translate_images_task(folder=images_dir, pdf=pdf_file_name):
@@ -54,6 +106,7 @@ def run_post_processing(
                 daemon=True,
             )
             img_thread.start()
+            translate_image_thread = img_thread
             translate_image_threads.append(img_thread)
             logger.info(f"图片翻译线程已启动（并行）: {pdf_file_name}")
         elif os.path.isdir(images_dir):
@@ -75,57 +128,125 @@ def run_post_processing(
             except Exception as e:
                 logger.error(f"配置生成失败: {pdf_file_name}, 错误: {e}")
                 continue
+
+            # 配置生成完成后立即启动 LLM 代码生成（异步），与后续流程并行
+            try:
+                header_futures[pdf_file_name] = header_engine.request_llm_in_background(layout_config_path)
+                logger.info(f"已启动页眉页脚代码生成（并行）: {pdf_file_name}")
+            except Exception as e:
+                logger.error(f"启动页眉页脚代码生成失败: {pdf_file_name}, 错误: {e}")
         else:
             logger.info(f"跳过生成配置（generate_config=False）: {pdf_file_name}")
             middle_md_path = original_md_path
+            if os.path.exists(layout_config_path):
+                try:
+                    header_futures[pdf_file_name] = header_engine.request_llm_in_background(layout_config_path)
+                    logger.info(f"已启动页眉页脚代码生成（并行，复用已有配置）: {pdf_file_name}")
+                except Exception as e:
+                    logger.error(f"启动页眉页脚代码生成失败: {pdf_file_name}, 错误: {e}")
 
         if translate_to_english:
             if translation_api_key is None:
                 logger.error("翻译功能需要提供 translation_api_key")
                 continue
 
-            logger.info(f"开始翻译文档: {pdf_file_name}")
+            logger.info(f"开始翻译文档 [{file_idx}/{len(file_name_list)}]: {pdf_file_name}")
             success = translate_file(middle_md_path, translated_md_path, translation_api_key)
             if not success:
                 logger.error(f"翻译失败: {pdf_file_name}")
                 continue
+            logger.info(f"翻译完成 [{file_idx}/{len(file_name_list)}]: {pdf_file_name}")
 
-        if generate_pdf:
-            target_md_path = translated_md_path if translate_to_english else original_md_path
-            pdf_output_path = os.path.join(file_output_dir, f"{pdf_file_name}_final_paper.pdf")
-
-            logger.info(f"开始生成PDF: {pdf_file_name}")
-            success = generate_pdf_from_md_file(target_md_path, pdf_output_path)
-            if not success:
-                logger.error(f"PDF生成失败: {pdf_file_name}")
+        # 统一确定最终用于后续处理/导出的 Markdown 路径
+        final_md_path = translated_md_path if translate_to_english and os.path.exists(translated_md_path) else middle_md_path
 
         if fix_md:
-            # 优先修复翻译后的文件，否则修复原始文件
-            target_md_path = translated_md_path if translate_to_english and os.path.exists(translated_md_path) else original_md_path
-
             logger.info(f"开始修复Markdown文件: {pdf_file_name}")
             try:
-                advanced_fix_markdown(target_md_path)
-                logger.info(f"Markdown修复完成: {pdf_file_name}")
+                advanced_fix_markdown(final_md_path)
+                # fix_md 会输出 *_v2.md，这里切换为修复后的文件作为后续输入
+                base_dir, base_name = os.path.split(final_md_path)
+                name, ext = os.path.splitext(base_name)
+                fixed_md_path = os.path.join(base_dir, f"{name}_v2{ext}")
+                if os.path.exists(fixed_md_path):
+                    final_md_path = fixed_md_path
+                    logger.info(f"Markdown修复完成并切换输出: {final_md_path}")
+                else:
+                    logger.warning(f"未找到修复输出文件，继续使用原文件: {final_md_path}")
             except Exception as e:
                 logger.error(f"Markdown修复失败: {pdf_file_name}, 错误: {e}")
 
+        if generate_pdf:
+            pdf_jobs.append(
+                {
+                    "name": pdf_file_name,
+                    "md_path": os.path.abspath(final_md_path),
+                    "layout_config": os.path.abspath(layout_config_path),
+                }
+            )
+        file_cost = time.perf_counter() - file_start
+        logger.info(f"文件处理耗时 {file_cost:.2f}s: {pdf_file_name}")
+
+    # 统一等待所有图片翻译线程完成，再进行 PDF 导出
     for t in translate_image_threads:
         t.join()
-    logger.info("所有图片翻译任务已完成")
+    if translate_image_threads:
+        logger.info("所有图片翻译任务已完成")
+
+    # 统一执行 PDF 导出及页眉页脚
+    for job in pdf_jobs:
+        pdf_file_name = job["name"]
+        final_md_path = job["md_path"]
+        layout_config_path = job["layout_config"]
+
+        pdf_output_path = None
+        try:
+            pdf_output_path = export_pdf_via_grpc(
+                final_md_path,
+                layout_config_path,
+                target=pdf_exporter_address,
+                timeout=pdf_export_timeout,
+            )
+            logger.info(f"PDF 导出完成: {pdf_output_path}")
+        except Exception as e:
+            logger.error(f"PDF 导出失败: {pdf_file_name}, 错误: {e}")
+
+        if pdf_output_path:
+            future = header_futures.get(pdf_file_name)
+            try:
+                header_start = time.perf_counter()
+                if future:
+                    header_output = header_engine.apply_header_when_ready(future, pdf_output_path)
+                elif os.path.exists(layout_config_path):
+                    header_output = header_engine.run_header_engine(layout_config_path, pdf_output_path)
+                else:
+                    logger.warning(f"未找到布局配置，跳过页眉页脚: {pdf_file_name}")
+                    header_output = None
+
+                if header_output:
+                    logger.info(f"页眉页脚处理完成: {header_output}")
+                header_cost = time.perf_counter() - header_start
+                logger.info(f"页眉页脚耗时 {header_cost:.2f}s: {pdf_file_name}")
+            except Exception as e:
+                logger.error(f"页眉页脚处理失败: {pdf_file_name}, 错误: {e}")
+
+    total_cost = time.perf_counter() - total_start
+    logger.info(f"后处理流程执行完毕，耗时 {total_cost:.2f}s")
 
 if __name__ == "__main__":
     # 在此处直接修改配置，避免命令行传参
     OUTPUT_DIR = "output"  # 解析结果输出目录
-    FILES = ["2025","H3_AP202001201374385298_1","CAICT","CICC_weekly","CHASING"]       # 待处理的文件名（不含扩展名）列表
+    # FILES = ["2025","H3_AP202001201374385298_1","CAICT","CICC_weekly","CHASING"]       # 待处理的文件名（不含扩展名）列表
+    FILES = ["2025"]   
     METHOD = "auto"        # 解析方法目录名
-    TRANSLATE = False      # 是否翻译为英文
-    TRANSLATION_API_KEY = None  # 翻译 API Key，开启翻译时需要
-    GENERATE_PDF = False   # 是否生成最终 PDF
-    FIX_MD = False         # 是否修复 Markdown
-    TRANSLATE_IMAGES_API_KEY = None  # 图片翻译所用 API Key，默认使用 translate_images.py 中的配置
-    TRANSLATE_IMAGES = False           # 是否翻译图片
+    TRANSLATE = True      # 是否翻译为英文
+    TRANSLATION_API_KEY = "apikey-dd675b2a3fcb4f1aa88b91503d87f730"  # 翻译 API Key，开启翻译时需要
+    GENERATE_PDF = True   # 是否生成最终 PDF
+    FIX_MD = True         # 是否修复 Markdown
+    TRANSLATE_IMAGES_API_KEY = "apikey-dd675b2a3fcb4f1aa88b91503d87f730"  # 图片翻译所用 API Key，默认使用 translate_images.py 中的配置
+    TRANSLATE_IMAGES = True           # 是否翻译图片
     GENERATE_CONFIG = True           # 是否生成布局配置
+    PDF_EXPORTER_ADDRESS = "localhost:50051"  # gRPC 服务地址
 
     run_post_processing(
         output_dir=OUTPUT_DIR,
@@ -138,4 +259,5 @@ if __name__ == "__main__":
         translate_images_api_key=TRANSLATE_IMAGES_API_KEY,
         translate_images=TRANSLATE_IMAGES,
         generate_config=GENERATE_CONFIG,
+        pdf_exporter_address=PDF_EXPORTER_ADDRESS,
     )

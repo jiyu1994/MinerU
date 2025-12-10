@@ -1,6 +1,7 @@
 import requests
 import json
 import os
+import time
 
 # ================= 配置区域 =================
 # 1. 你的 API Key
@@ -16,6 +17,8 @@ headers = {
     "Content-Type": "application/json",
     "Authorization": f"Bearer {API_KEY}"
 }
+# 是否在控制台实时打印流式返回内容；关闭后仍会写入文件
+PRINT_STREAM_CONTENT = False
 # ===========================================
 
 def main():
@@ -62,6 +65,10 @@ def main():
             
             # 打开输出文件准备写入
             with open(output_md_path, 'w', encoding='utf-8') as f_out:
+                bytes_written = 0
+                report_step = 2000  # 每累计 2000 字符打印一次进度
+                last_report = 0
+
                 # 逐行读取网络流
                 for line in response.iter_lines():
                     if line:
@@ -95,10 +102,13 @@ def main():
                                 continue
 
                             if content:
-                                # 1. 打印到屏幕（让你看到进度）
-                                print(content, end='', flush=True)
-                                # 2. 写入文件
+                                if PRINT_STREAM_CONTENT:
+                                    print(content, end='', flush=True)
                                 f_out.write(content)
+                                bytes_written += len(content)
+                                if bytes_written - last_report >= report_step:
+                                    print(f"已接收约 {bytes_written} 字符")
+                                    last_report = bytes_written
 
                         except json.JSONDecodeError:
                             print(f"DEBUG: 无法解析JSON: {line_str[:100]}...")
@@ -160,6 +170,7 @@ def translate_file(input_path, output_path, api_key):
 
     # 4. 发送请求并流式处理，添加重试机制
     max_retries = 3
+    idle_timeout = 180  # 单次尝试内的无数据超时时间（秒）
     for attempt in range(max_retries):
         try:
             print(f"第 {attempt + 1} 次尝试...")
@@ -171,51 +182,66 @@ def translate_file(input_path, output_path, api_key):
 
                 # 打开输出文件准备写入
                 with open(output_path, 'w', encoding='utf-8') as f_out:
+                    bytes_written = 0
+                    report_step = 2000  # 每累计 2000 字符打印一次进度
+                    last_report = 0
+                    last_chunk_ts = time.time()
+
                     # 逐行读取网络流，添加超时和中断处理
                     try:
-                        for line in response.iter_lines():
-                            if line:
-                                # 去掉开头的 "data: " 前缀
-                                line_str = line.decode('utf-8').strip()
-                                if line_str.startswith("data: "):
-                                    line_str = line_str[6:]
+                        for line in response.iter_lines(chunk_size=1024):
+                            now = time.time()
+                            if line is None or line == b"":
+                                if now - last_chunk_ts > idle_timeout:
+                                    raise TimeoutError(f"流式传输{idle_timeout}s无数据，已中断")
+                                continue
 
-                                # 结束标志
-                                if line_str == "[DONE]":
-                                    break
+                            last_chunk_ts = now
 
-                                try:
-                                    # 解析 JSON 数据块
-                                    json_chunk = json.loads(line_str)
+                            # 去掉开头的 "data: " 前缀
+                            line_str = line.decode('utf-8').strip()
+                            if line_str.startswith("data: "):
+                                line_str = line_str[6:]
 
-                                    # 检查是否有错误信息
-                                    if 'error' in json_chunk:
-                                        print(f"API错误: {json_chunk['error']}")
+                            # 结束标志
+                            if line_str == "[DONE]":
+                                break
+
+                            try:
+                                # 解析 JSON 数据块
+                                json_chunk = json.loads(line_str)
+
+                                # 检查是否有错误信息
+                                if 'error' in json_chunk:
+                                    print(f"API错误: {json_chunk['error']}")
+                                    continue
+
+                                # 提取文本内容
+                                if 'choices' in json_chunk and len(json_chunk['choices']) > 0:
+                                    try:
+                                        content = json_chunk['choices'][0]['delta'].get('content', '')
+                                    except (IndexError, KeyError) as e:
+                                        print(f"DEBUG: 提取content失败: {e}, 数据结构: {list(json_chunk.keys())}")
                                         continue
+                                else:
+                                    print(f"DEBUG: choices为空或不存在，数据结构: {list(json_chunk.keys()) if isinstance(json_chunk, dict) else type(json_chunk)}")
+                                    continue
 
-                                    # 提取文本内容
-                                    if 'choices' in json_chunk and len(json_chunk['choices']) > 0:
-                                        try:
-                                            content = json_chunk['choices'][0]['delta'].get('content', '')
-                                        except (IndexError, KeyError) as e:
-                                            print(f"DEBUG: 提取content失败: {e}, 数据结构: {list(json_chunk.keys())}")
-                                            continue
-                                    else:
-                                        print(f"DEBUG: choices为空或不存在，数据结构: {list(json_chunk.keys()) if isinstance(json_chunk, dict) else type(json_chunk)}")
-                                        continue
-
-                                    if content:
-                                        # 1. 打印到屏幕（让你看到进度）
+                                if content:
+                                    if PRINT_STREAM_CONTENT:
                                         print(content, end='', flush=True)
-                                        # 2. 写入文件
-                                        f_out.write(content)
+                                    f_out.write(content)
+                                    bytes_written += len(content)
+                                    if bytes_written - last_report >= report_step:
+                                        print(f"已接收约 {bytes_written} 字符")
+                                        last_report = bytes_written
 
-                                except json.JSONDecodeError:
-                                    print(f"DEBUG: 无法解析JSON: {line_str[:100]}...")
-                                    continue
-                                except Exception as e:
-                                    print(f"DEBUG: 其他错误: {e}, 数据: {line_str[:100]}...")
-                                    continue
+                            except json.JSONDecodeError:
+                                print(f"DEBUG: 无法解析JSON: {line_str[:100]}...")
+                                continue
+                            except Exception as e:
+                                print(f"DEBUG: 其他错误: {e}, 数据: {line_str[:100]}...")
+                                continue
 
                         print(f"\n\n✅ 翻译完成！文件已保存至: {output_path}")
                         print("🎉 现在你可以用 Typora 或 VS Code 打开这个新文件查看效果了！")

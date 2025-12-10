@@ -35,8 +35,8 @@ def get_safe_dimensions(w, h):
     """
     根据原宽高，计算出符合 API 要求的 64 倍数宽高
     """
-    safe_w = (w // 64) * 64
-    safe_h = (h // 64) * 64
+    safe_w = w
+    safe_h = h
     safe_w = max(512, safe_w) # 最小保底
     safe_h = max(512, safe_h)
     return safe_w, safe_h
