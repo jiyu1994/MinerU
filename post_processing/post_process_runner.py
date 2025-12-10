@@ -117,7 +117,7 @@ def run_post_processing(
 if __name__ == "__main__":
     # 在此处直接修改配置，避免命令行传参
     OUTPUT_DIR = "output"  # 解析结果输出目录
-    FILES = ["2025"]       # 待处理的文件名（不含扩展名）列表
+    FILES = ["2025","H3_AP202001201374385298_1","CAICT","CICC_weekly","CHASING"]       # 待处理的文件名（不含扩展名）列表
     METHOD = "auto"        # 解析方法目录名
     TRANSLATE = False      # 是否翻译为英文
     TRANSLATION_API_KEY = None  # 翻译 API Key，开启翻译时需要

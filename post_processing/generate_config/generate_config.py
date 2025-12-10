@@ -166,7 +166,13 @@ def analyze_layout(SOURCE_JSON, OUTPUT_CONFIG, MarkDownPath):
             # 暂时收集所有被丢弃的文本，稍后根据最终页面高度判断位置
             # 存入中心点 x 坐标，方便判断左右
             center_x = (x0 + x1) / 2
-            item_data = {'text': item.get('text', ''), 'x': x0, 'y': y1, 'center_x': center_x}
+            item_data = {
+                'text': item.get('text', ''),
+                'x': x0,
+                'y': y1,
+                'center_x': center_x,
+                'page_idx': item.get('page_idx')
+            }
             
             # 这里先不区分 header/footer，等确定页面高度后再分
             header_candidates.append(item_data) 
@@ -225,7 +231,6 @@ def analyze_layout(SOURCE_JSON, OUTPUT_CONFIG, MarkDownPath):
                 real_footers.append(item)
     
 
-
     real_footers.sort(key=lambda k: k['x'])
 
     footer_left = ""
@@ -258,7 +263,8 @@ def analyze_layout(SOURCE_JSON, OUTPUT_CONFIG, MarkDownPath):
     def get_page_size_mm():
         # 推测 PDF 路径：与 JSON 同目录、同前缀
         base_dir = os.path.dirname(SOURCE_JSON)
-        base_name = os.path.splitext(os.path.basename(SOURCE_JSON))[0].split('_')[0]
+        base_name_full = os.path.splitext(os.path.basename(SOURCE_JSON))[0]
+        base_name = base_name_full.split('_content_list')[0]
         candidates = [
             os.path.join(base_dir, f"{base_name}.pdf"),
             os.path.join(base_dir, f"{base_name}_origin.pdf"),
@@ -279,6 +285,11 @@ def analyze_layout(SOURCE_JSON, OUTPUT_CONFIG, MarkDownPath):
         return "1000", "1000"
 
     page_width_mm, page_height_mm = get_page_size_mm()
+
+    # 额外输出：header_candidates 中不在 others 列表里的元素，便于调试
+    header_candidates_not_in_others = [
+        item for item in header_candidates if item.get("text", "") not in others
+    ]
 
     # 9. 生成结果
     result = {
@@ -306,7 +317,8 @@ def analyze_layout(SOURCE_JSON, OUTPUT_CONFIG, MarkDownPath):
             "y": f"{footer_y:.0f}",
             "unit": "permille"
         },
-        "others": others
+        "others": others,
+        "header_candidates": header_candidates_not_in_others
     }
 
     # 9. 写入文件
