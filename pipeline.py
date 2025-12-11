@@ -18,6 +18,7 @@ from mineru.backend.pipeline.pipeline_middle_json_mkcontent import union_make as
 from mineru.backend.pipeline.model_json_to_middle_json import result_to_middle_json as pipeline_result_to_middle_json
 from mineru.backend.vlm.vlm_middle_json_mkcontent import union_make as vlm_union_make
 from mineru.utils.guess_suffix_or_lang import guess_suffix_by_path
+from mineru.utils.config_reader import get_device
 
 
 def do_parse(
@@ -214,6 +215,18 @@ def parse_doc(
         file_name_list = []
         pdf_bytes_list = []
         lang_list = []
+
+        # 简单打印当前推理设备（与内部 get_device 一致）
+        device = get_device()
+        device_detail = device
+        try:
+            import torch
+            if device == "cuda" and torch.cuda.is_available():
+                device_detail = f"cuda ({torch.cuda.get_device_name(0)})"
+        except Exception:
+            pass
+        logger.info(f"当前使用设备: {device_detail}")
+
         for path in path_list:
             file_name = str(Path(path).stem)
             pdf_bytes = read_fn(path)
