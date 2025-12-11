@@ -12,7 +12,7 @@ TARGET_FOLDER = "output/H3_AP202001201374385298_1/auto/images"
 PROMPT_TEXT = "Translate other languages in the image to English"
 
 # 并发数量
-MAX_WORKERS = 10
+MAX_WORKERS = 20
 # ===========================================
 
 def get_image_info(image_path):
@@ -112,7 +112,7 @@ def process_with_ai(image_url, safe_w, safe_h, filename_tag, api_key, prompt_tex
     }
 
     data = {
-        "model": "google/nano-banana-pro/edit-ultra",
+        "model": "atlascloud/qwen-image/edit-plus",
         "enable_base64_output": False,
         "enable_sync_mode": False,
         "images": [image_url],

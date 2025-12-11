@@ -74,7 +74,7 @@ def run_post_processing(
     try:
         from translate.translate_images import translate_images_for_folder
         from translate.translate import translate_file
-        from post_processing.fix_md.fix_md import advanced_fix_markdown
+        from post_processing.fix_md.fix_md_math import advanced_fix_markdown
         from post_processing.generate_config.generate_config import analyze_layout
         from post_processing.header_engine import header_engine
     except ImportError as e:
@@ -95,10 +95,14 @@ def run_post_processing(
 
         if translate_images and os.path.isdir(images_dir):
             def _translate_images_task(folder=images_dir, pdf=pdf_file_name):
+                img_start = time.perf_counter()
                 try:
                     translate_images_for_folder(folder, api_key=translate_images_api_key)
+                    img_cost = time.perf_counter() - img_start
+                    logger.info(f"图片翻译完成: {pdf}，耗时 {img_cost:.2f}s")
                 except Exception as exc:  # noqa: BLE001
-                    logger.error(f"图片翻译失败: {pdf}, 错误: {exc}")
+                    img_cost = time.perf_counter() - img_start
+                    logger.error(f"图片翻译失败: {pdf}，耗时 {img_cost:.2f}s，错误: {exc}")
 
             img_thread = threading.Thread(
                 target=_translate_images_task,
@@ -122,17 +126,22 @@ def run_post_processing(
 
         if generate_config:
             logger.info(f"开始生成配置和最终markdown: {pdf_file_name}")
+            config_start = time.perf_counter()
             try:
                 middle_md_path = analyze_layout(source_json_path, layout_config_path, original_md_path)
-                logger.info(f"配置生成完成: {pdf_file_name}")
+                config_cost = time.perf_counter() - config_start
+                logger.info(f"配置生成完成: {pdf_file_name}，耗时 {config_cost:.2f}s")
             except Exception as e:
-                logger.error(f"配置生成失败: {pdf_file_name}, 错误: {e}")
+                config_cost = time.perf_counter() - config_start
+                logger.error(f"配置生成失败: {pdf_file_name}，耗时 {config_cost:.2f}s，错误: {e}")
                 continue
 
             # 配置生成完成后立即启动 LLM 代码生成（异步），与后续流程并行
             try:
+                header_request_start = time.perf_counter()
                 header_futures[pdf_file_name] = header_engine.request_llm_in_background(layout_config_path)
-                logger.info(f"已启动页眉页脚代码生成（并行）: {pdf_file_name}")
+                header_request_cost = time.perf_counter() - header_request_start
+                logger.info(f"已启动页眉页脚代码生成（并行）: {pdf_file_name}，耗时 {header_request_cost:.2f}s")
             except Exception as e:
                 logger.error(f"启动页眉页脚代码生成失败: {pdf_file_name}, 错误: {e}")
         else:
@@ -140,8 +149,10 @@ def run_post_processing(
             middle_md_path = original_md_path
             if os.path.exists(layout_config_path):
                 try:
+                    header_request_start = time.perf_counter()
                     header_futures[pdf_file_name] = header_engine.request_llm_in_background(layout_config_path)
-                    logger.info(f"已启动页眉页脚代码生成（并行，复用已有配置）: {pdf_file_name}")
+                    header_request_cost = time.perf_counter() - header_request_start
+                    logger.info(f"已启动页眉页脚代码生成（并行，复用已有配置）: {pdf_file_name}，耗时 {header_request_cost:.2f}s")
                 except Exception as e:
                     logger.error(f"启动页眉页脚代码生成失败: {pdf_file_name}, 错误: {e}")
 
@@ -151,30 +162,37 @@ def run_post_processing(
                 continue
 
             logger.info(f"开始翻译文档 [{file_idx}/{len(file_name_list)}]: {pdf_file_name}")
+            translate_start = time.perf_counter()
             success = translate_file(middle_md_path, translated_md_path, translation_api_key)
+            translate_cost = time.perf_counter() - translate_start
             if not success:
-                logger.error(f"翻译失败: {pdf_file_name}")
+                logger.error(f"翻译失败: {pdf_file_name}，耗时 {translate_cost:.2f}s")
                 continue
-            logger.info(f"翻译完成 [{file_idx}/{len(file_name_list)}]: {pdf_file_name}")
+            logger.info(f"翻译完成 [{file_idx}/{len(file_name_list)}]: {pdf_file_name}，耗时 {translate_cost:.2f}s")
 
         # 统一确定最终用于后续处理/导出的 Markdown 路径
         final_md_path = translated_md_path if translate_to_english and os.path.exists(translated_md_path) else middle_md_path
 
         if fix_md:
             logger.info(f"开始修复Markdown文件: {pdf_file_name}")
+            fix_md_start = time.perf_counter()
             try:
                 advanced_fix_markdown(final_md_path)
-                # fix_md 会输出 *_v2.md，这里切换为修复后的文件作为后续输入
+                # fix_md 会输出 *_fixed.md，这里切换为修复后的文件作为后续输入
                 base_dir, base_name = os.path.split(final_md_path)
                 name, ext = os.path.splitext(base_name)
-                fixed_md_path = os.path.join(base_dir, f"{name}_v2{ext}")
+                fixed_md_path = os.path.join(base_dir, f"{name}_fixed{ext}")
+                logger.info(f"修复后的Markdown文件路径: {fixed_md_path}")
                 if os.path.exists(fixed_md_path):
                     final_md_path = fixed_md_path
-                    logger.info(f"Markdown修复完成并切换输出: {final_md_path}")
+                    fix_md_cost = time.perf_counter() - fix_md_start
+                    logger.info(f"Markdown修复完成并切换输出: {final_md_path}，耗时 {fix_md_cost:.2f}s")
                 else:
-                    logger.warning(f"未找到修复输出文件，继续使用原文件: {final_md_path}")
+                    fix_md_cost = time.perf_counter() - fix_md_start
+                    logger.warning(f"未找到修复输出文件，继续使用原文件: {final_md_path}，耗时 {fix_md_cost:.2f}s")
             except Exception as e:
-                logger.error(f"Markdown修复失败: {pdf_file_name}, 错误: {e}")
+                fix_md_cost = time.perf_counter() - fix_md_start
+                logger.error(f"Markdown修复失败: {pdf_file_name}，耗时 {fix_md_cost:.2f}s，错误: {e}")
 
         if generate_pdf:
             pdf_jobs.append(
@@ -188,10 +206,12 @@ def run_post_processing(
         logger.info(f"文件处理耗时 {file_cost:.2f}s: {pdf_file_name}")
 
     # 统一等待所有图片翻译线程完成，再进行 PDF 导出
+    wait_images_start = time.perf_counter()
     for t in translate_image_threads:
         t.join()
     if translate_image_threads:
-        logger.info("所有图片翻译任务已完成")
+        wait_images_cost = time.perf_counter() - wait_images_start
+        logger.info(f"所有图片翻译任务已完成，等待耗时 {wait_images_cost:.2f}s")
 
     # 统一执行 PDF 导出及页眉页脚
     for job in pdf_jobs:
@@ -201,15 +221,18 @@ def run_post_processing(
 
         pdf_output_path = None
         try:
+            pdf_export_start = time.perf_counter()
             pdf_output_path = export_pdf_via_grpc(
                 final_md_path,
                 layout_config_path,
                 target=pdf_exporter_address,
                 timeout=pdf_export_timeout,
             )
-            logger.info(f"PDF 导出完成: {pdf_output_path}")
+            pdf_export_cost = time.perf_counter() - pdf_export_start
+            logger.info(f"PDF 导出完成: {pdf_output_path}，耗时 {pdf_export_cost:.2f}s")
         except Exception as e:
-            logger.error(f"PDF 导出失败: {pdf_file_name}, 错误: {e}")
+            pdf_export_cost = time.perf_counter() - pdf_export_start
+            logger.error(f"PDF 导出失败: {pdf_file_name}，耗时 {pdf_export_cost:.2f}s，错误: {e}")
 
         if pdf_output_path:
             future = header_futures.get(pdf_file_name)
@@ -228,7 +251,8 @@ def run_post_processing(
                 header_cost = time.perf_counter() - header_start
                 logger.info(f"页眉页脚耗时 {header_cost:.2f}s: {pdf_file_name}")
             except Exception as e:
-                logger.error(f"页眉页脚处理失败: {pdf_file_name}, 错误: {e}")
+                header_cost = time.perf_counter() - header_start
+                logger.error(f"页眉页脚处理失败: {pdf_file_name}，耗时 {header_cost:.2f}s，错误: {e}")
 
     total_cost = time.perf_counter() - total_start
     logger.info(f"后处理流程执行完毕，耗时 {total_cost:.2f}s")

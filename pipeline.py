@@ -3,6 +3,7 @@ import copy
 import json
 import os
 import sys
+import time
 from pathlib import Path
 
 from loguru import logger
@@ -171,7 +172,10 @@ def parse_doc(
         generate_pdf=False,
         fix_md=False,
         translate_images=False,
+        translate_images_api_key=None,
         generate_config=False,
+        pdf_exporter_address=None,
+        pdf_export_timeout=300,
 ):
     """
         Parameter description:
@@ -200,9 +204,13 @@ def parse_doc(
         generate_pdf: Whether to generate PDF from the translated markdown, default is False
         fix_md: Whether to apply advanced markdown fixing to the final markdown file, default is False
         translate_images: Whether to translate images, default is False
+        translate_images_api_key: API key for image translation service
         generate_config: Whether to generate layout config and final markdown, default is False
+        pdf_exporter_address: gRPC endpoint for PDF export, required if generate_pdf is True
+        pdf_export_timeout: Timeout seconds for PDF export gRPC call
     """
     try:
+        total_start = time.perf_counter()
         file_name_list = []
         pdf_bytes_list = []
         lang_list = []
@@ -212,6 +220,8 @@ def parse_doc(
             file_name_list.append(file_name)
             pdf_bytes_list.append(pdf_bytes)
             lang_list.append(lang)
+
+        parse_start = time.perf_counter()
         do_parse(
             output_dir=output_dir,
             pdf_file_names=file_name_list,
@@ -223,6 +233,8 @@ def parse_doc(
             start_page_id=start_page_id,
             end_page_id=end_page_id
         )
+        parse_cost = time.perf_counter() - parse_start
+        logger.info(f"解析阶段耗时 {parse_cost:.2f}s，处理文件数 {len(file_name_list)}")
 
         # 后处理步骤：翻译、PDF生成、Markdown修复、图片翻译、配置生成
         if translate_to_english or generate_pdf or fix_md or translate_images or generate_config:
@@ -236,6 +248,7 @@ def parse_doc(
                 logger.error(f"无法导入后处理模块: {e}")
                 return
 
+            post_start = time.perf_counter()
             run_post_processing(
                 output_dir=output_dir,
                 file_name_list=file_name_list,
@@ -245,8 +258,16 @@ def parse_doc(
                 generate_pdf=generate_pdf,
                 fix_md=fix_md,
                 translate_images=translate_images,
+                translate_images_api_key=translate_images_api_key,
                 generate_config=generate_config,
+                pdf_exporter_address=pdf_exporter_address,
+                pdf_export_timeout=pdf_export_timeout,
             )
+            post_cost = time.perf_counter() - post_start
+            logger.info(f"后处理阶段耗时 {post_cost:.2f}s")
+
+        total_cost = time.perf_counter() - total_start
+        logger.info(f"全流程完成，总耗时 {total_cost:.2f}s")
 
     except Exception as e:
         logger.exception(e)
@@ -274,15 +295,31 @@ if __name__ == '__main__':
     """如果您由于网络问题无法下载模型，可以设置环境变量MINERU_MODEL_SOURCE为modelscope使用免代理仓库下载模型"""
     # os.environ['MINERU_MODEL_SOURCE'] = "modelscope"
     api_key = "apikey-dd675b2a3fcb4f1aa88b91503d87f730"
+    pdf_exporter_address = "localhost:50051"
 
     """Use pipeline mode if your environment does not support VLM"""
-    parse_doc(doc_path_list, output_dir, backend="pipeline", translate_to_english=True, translation_api_key=api_key, fix_md=True)
+    parse_doc(
+        doc_path_list,
+        output_dir,
+        backend="pipeline",
+        translate_to_english=True,
+        translation_api_key=api_key,
+        fix_md=True,
+        translate_images=True,
+        translate_images_api_key=api_key,
+        generate_config=True,
+        generate_pdf=True,
+        pdf_exporter_address=pdf_exporter_address,
+    )
 
     """启用翻译、PDF生成和Markdown修复功能的示例"""
     # 翻译API key - 请替换为你的实际API key
-    api_key = "apikey-dd675b2a3fcb4f1aa88b91503d87f730"
+    # api_key = "your-translation-key"
     # parse_doc(doc_path_list, output_dir, backend="pipeline",
-    #          translate_to_english=True, translation_api_key=api_key, generate_pdf=True, fix_md=True)
+    #          translate_to_english=True, translation_api_key=api_key,
+    #          generate_pdf=True, fix_md=True, translate_images=True,
+    #          translate_images_api_key=api_key, generate_config=True,
+    #          pdf_exporter_address=pdf_exporter_address)
 
     """To enable VLM mode, change the backend to 'vlm-xxx'"""
     # parse_doc(doc_path_list, output_dir, backend="vlm-transformers")  # more general.

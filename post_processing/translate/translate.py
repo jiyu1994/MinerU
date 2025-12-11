@@ -45,7 +45,7 @@ def main():
 
     # 3. 构造请求数据
     data = {
-        "model": "openai/gpt-5.1",  # 确保你的供应商支持这个模型名
+        "model": "google/gemini-3-pro-preview",  # 确保你的供应商支持这个模型名
         "messages": [
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": f"Please translate the following content into English, output only the translated Markdown directly without any additional content：\n\n{file_content}"}
@@ -156,7 +156,7 @@ def translate_file(input_path, output_path, api_key):
 
     # 3. 构造请求数据
     data = {
-        "model": "openai/gpt-5.1",  # 确保你的供应商支持这个模型名
+        "model": "google/gemini-3-pro-preview",  # 确保你的供应商支持这个模型名
         "messages": [
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": f"Please translate the following content into English, output only the translated Markdown directly without any additional content：\n\n{file_content}"}
